@@ -53,3 +53,50 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# ======================
+# Arduino 编译垃圾（必忽略）
+# ======================
+build/
+*.hex
+*.elf
+*.bin
+*.map
+*.eep
+*.axf
+*.o
+*.d
+*.lst
+*.sym
+*.tmp
+arduino_build_*/
+sketch/
+*.log
+
+# ======================
+# VS Code IDE 垃圾（必忽略）
+# ======================
+.vscode/
+*.code-workspace
+!.vscode/extensions.json
+!.vscode/arduino.json
+
+# ======================
+# C/C++ 编译垃圾
+# ======================
+*.exe
+*.out
+*.app
+*.a
+*.so
+
+# ======================
+# 操作系统垃圾（全平台通用）
+# ======================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
