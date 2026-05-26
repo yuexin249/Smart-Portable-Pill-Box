@@ -46,4 +46,3 @@ void playSuperMario() {
     delay(50);
   }
   noTone(BUZZER_PIN);
-}
