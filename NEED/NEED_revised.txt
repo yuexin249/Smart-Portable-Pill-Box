@@ -1,0 +1,224 @@
+// ESP32 智能服药提醒系统（基于原有引脚）
+// 说明：
+//   - 原有硬件保留：7 段数码管、OLED、蜂鸣器、按键
+//   - 你已有舵机：连接到 SERVO_PIN
+//   - 你没有真实盒盖传感器：启用 SIMULATE_COVER_SENSOR
+//   - 未来如果接入真实传感器：将 SIMULATE_COVER_SENSOR 设为 false，并连接 COVER_PIN
+
+#include <Arduino.h>
+#include <Servo.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// 7 段数码管引脚 (保持原有)
+const int segPins[] = {13, 12, 14, 27, 26, 25, 33};
+const byte numCodes[10] = {0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F};
+
+// 原有蜂鸣器和按键引脚
+#define BUZZER_PIN 18
+#define KEY_PIN 19
+
+// 新增舵机和可选合盖传感器引脚
+#define SERVO_PIN 32
+#define COVER_PIN 35
+
+// 没有真实盖检测传感器时保持 true
+#define SIMULATE_COVER_SENSOR true
+
+#define SCREEN_I2C_ADDR 0x3C
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RST_PIN -1
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST_PIN);
+Servo coverServo;
+
+enum SystemState { STATE_IDLE, STATE_REMINDER, STATE_OPEN, STATE_MEDICATED };
+SystemState systemState = STATE_IDLE;
+
+bool lastKeyState = HIGH;
+unsigned long lastReminderMs = 0;
+const unsigned long REMINDER_INTERVAL_MS = 5000;
+const unsigned long MED_WINDOW_START_MS = 15000;   // 测试：开机 15s 后进入服药时间窗
+const unsigned long MED_WINDOW_DURATION_MS = 30000; // 测试：时间窗持续 30s
+
+bool simulatedCoverClosed = true;
+
+bool isMedicationWindow() {
+  unsigned long now = millis();
+  return now >= MED_WINDOW_START_MS && now < MED_WINDOW_START_MS + MED_WINDOW_DURATION_MS;
+}
+
+bool readCoverSensor() {
+  if (SIMULATE_COVER_SENSOR) {
+    return simulatedCoverClosed;
+  }
+  return digitalRead(COVER_PIN) == HIGH;
+}
+
+void setSegNumber(int num) {
+  num = constrain(num, 0, 9);
+  byte code = numCodes[num];
+  for (int i = 0; i < 7; i++) {
+    digitalWrite(segPins[i], bitRead(code, i));
+  }
+}
+
+void playReminderTone() {
+  tone(BUZZER_PIN, 1200);
+  delay(120);
+  noTone(BUZZER_PIN);
+}
+
+void playRewardTone() {
+  const int notes[3] = {1000, 1400, 1800};
+  for (int i = 0; i < 3; i++) {
+    tone(BUZZER_PIN, notes[i]);
+    delay(120);
+    noTone(BUZZER_PIN);
+    delay(40);
+  }
+}
+
+void playFailureTone() {
+  tone(BUZZER_PIN, 700);
+  delay(220);
+  noTone(BUZZER_PIN);
+}
+
+void drawFace(bool positive) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(12, 4);
+  display.println(positive ? "SMILE" : "WAIT");
+  display.setTextSize(1);
+  display.setCursor(0, 28);
+  if (positive) {
+    display.println("Good job! Take meds on time.");
+  } else {
+    display.println("Press key during medication window.");
+  }
+  display.display();
+}
+
+void drawGuidance(uint8_t quadrant) {
+  display.clearDisplay();
+  display.drawRect(0, 0, 62, 30, WHITE);
+  display.drawRect(66, 0, 62, 30, WHITE);
+  display.drawRect(0, 34, 62, 30, WHITE);
+  display.drawRect(66, 34, 62, 30, WHITE);
+  if (quadrant == 1) display.fillRect(2, 2, 58, 26, WHITE);
+  if (quadrant == 2) display.fillRect(68, 2, 58, 26, WHITE);
+  if (quadrant == 3) display.fillRect(2, 36, 58, 26, WHITE);
+  if (quadrant == 4) display.fillRect(68, 36, 58, 26, WHITE);
+  display.display();
+}
+
+void drawStatus(const char *txt) {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(0, 24);
+  display.println(txt);
+  display.display();
+}
+
+void openCover() {
+  coverServo.write(90);
+}
+
+void closeCover() {
+  coverServo.write(0);
+}
+
+void setup() {
+  for (int i = 0; i < 7; i++) pinMode(segPins[i], OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(KEY_PIN, INPUT_PULLUP);
+  if (!SIMULATE_COVER_SENSOR) pinMode(COVER_PIN, INPUT_PULLUP);
+
+  coverServo.attach(SERVO_PIN);
+  closeCover();
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_I2C_ADDR)) {
+    while (true) {
+      delay(100);
+    }
+  }
+
+  display.clearDisplay();
+  drawStatus("READY");
+  delay(1000);
+}
+
+void loop() {
+  bool currentKeyState = digitalRead(KEY_PIN);
+  bool keyPressed = (currentKeyState == LOW && lastKeyState == HIGH);
+
+  if (keyPressed) {
+    delay(20);
+    currentKeyState = digitalRead(KEY_PIN);
+    keyPressed = (currentKeyState == LOW && lastKeyState == HIGH);
+  }
+  lastKeyState = currentKeyState;
+
+  bool windowActive = isMedicationWindow();
+  unsigned long now = millis();
+
+  if (!windowActive && systemState != STATE_MEDICATED) {
+    systemState = STATE_IDLE;
+  }
+
+  switch (systemState) {
+    case STATE_IDLE:
+      setSegNumber(0);
+      drawFace(true);
+      if (windowActive) {
+        systemState = STATE_REMINDER;
+        lastReminderMs = now;
+      }
+      break;
+
+    case STATE_REMINDER:
+      setSegNumber(1);
+      drawFace(false);
+      if (now - lastReminderMs >= REMINDER_INTERVAL_MS) {
+        lastReminderMs = now;
+        playReminderTone();
+      }
+      if (windowActive && keyPressed) {
+        openCover();
+        if (SIMULATE_COVER_SENSOR) simulatedCoverClosed = false;
+        systemState = STATE_OPEN;
+      }
+      break;
+
+    case STATE_OPEN:
+      setSegNumber(2);
+      drawGuidance(1);
+      if (keyPressed) {
+        if (SIMULATE_COVER_SENSOR) {
+          simulatedCoverClosed = true;
+        }
+        if (readCoverSensor()) {
+          closeCover();
+          playRewardTone();
+          systemState = STATE_MEDICATED;
+        } else {
+          playFailureTone();
+        }
+      }
+      break;
+
+    case STATE_MEDICATED:
+      setSegNumber(3);
+      drawFace(true);
+      break;
+
+    default:
+      systemState = STATE_IDLE;
+      break;
+  }
+
+  delay(50);
+}
